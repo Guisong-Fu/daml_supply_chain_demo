@@ -1,0 +1,232 @@
+module SupplyChain.Demo where
+
+import Daml.Script
+
+data Cash = Cash with
+  currency : Text
+  amount : Decimal
+    deriving (Eq, Show)
+
+-- What is this difference? {} vs. with?
+data Product =
+  Product {
+    productName: Text;
+    quantity: Int
+  } deriving (Eq, Show)
+
+-- Customer send OrderRequest to Manufacturer & Let Manufacturer be able to Accpet the request
+-- Todo: what if we want to reject? How should we do the reject?
+template CustomerManufacturerOrderRequest
+  with
+    customer : Party
+    manufacturer : Party
+    products: [Product]
+  where
+    signatory customer
+    controller manufacturer can
+      CustomerManufacturerOrderRequest_Accpet : ContractId CustomerManufacturerOrderRequestAccepted
+        with
+          workflowId: Text
+        do
+          create $ CustomerManufacturerOrderRequestAccepted with workflowId, customer, manufacturer
+
+-- Implement the reject action: maybe another contract(with text: reason)
+
+
+-- Manufacturer accpets the OrderRequest & specify a workflowId & Manufacturer can Send an order request to supplier
+template CustomerManufacturerOrderRequestAccepted
+  with
+    workflowId: Text -- Guisong: is this only for keeping the record?
+    customer: Party
+    manufacturer  : Party
+  where
+    signatory manufacturer
+    controller manufacturer can
+      CustomerManufacturerOrderRequestAccepted_SendToSupplier : ContractId ManufacturerSupplierOrderRequest
+        with
+          products: [Product]
+          supplier: Party
+        do
+          create ManufacturerSupplierOrderRequest with manufacturer, supplier, products
+    -- Another choice, manufacturer can directly send to workshop if the supply is sufficient
+
+-- manufacturer sends a request to supplier & let supplier be able to accept the request or reject
+template ManufacturerSupplierOrderRequest
+  with
+    manufacturer : Party
+    supplier : Party
+    products: [Product]
+  where
+    signatory manufacturer -- Guisong: should this be two?
+    controller supplier can
+      ManufacturerSupplierOrderRequest_Accpet : ContractId ManufacturerSupplierOrderRequestAccepted
+        with
+          workflowId: Text
+        do
+          create $ ManufacturerSupplierOrderRequestAccepted with workflowId, supplier, manufacturer
+
+-- implement the reject here
+
+
+-- Supplier finish the process and send deliveryNot to manufacturer
+template ManufacturerSupplierOrderRequestAccepted
+  with
+    workflowId: Text -- Guisong: is this only for keeping the record?
+    supplier: Party
+    manufacturer  : Party
+  where
+    signatory supplier
+    controller supplier can
+      FinishProcessAndDeliver : ContractId DeliverToManufacturer
+        with
+          deliveryNote : Text -- Guisong: how should we carry all the information? Certificate filePath
+        do
+          create $ DeliverToManufacturer with deliveryNote, supplier, manufacturer
+
+-- Confirmation? Do we need to send confirmation back? If so, in what format should this confirmation be sent?
+
+-- manufacturer can Accept
+template DeliverToManufacturer
+  with
+    supplier : Party
+    manufacturer : Party
+    deliveryNote : Text
+  where
+    signatory supplier
+    controller manufacturer can
+      AcceptProudct : () -- Innvoint also distributes differenct batches here? How should we do that?
+        do return ()
+
+-- What if manufacturer reject? 
+
+-- manufacturer sends to workshop
+template ManufacturerSendRequestToWorkshop
+  with
+    manufacturer : Party
+    workshop : Party
+    products : [Product]
+  where
+    signatory manufacturer
+    controller workshop can
+      WorkshopFinish : ContractId WorkshopFinishSendToManufacturer
+        with
+          workshopNote : Text -- Guisong: how should we carry all the information? Certificate filePath
+        do
+          create $ WorkshopFinishSendToManufacturer with workshopNote, workshop, manufacturer
+
+
+template WorkshopFinishSendToManufacturer
+  with
+    workshop : Party
+    manufacturer : Party
+    workshopNote : Text
+  where
+    signatory workshop
+    controller manufacturer can
+      AcceptWorkshopProudct : ()
+        do return ()
+
+
+-- todo: how to carry the information from previous order? 
+template ManufacturerCustomerDelivery
+  with
+    manufacturer : Party
+    customer: Party
+    deliveryNote: Text
+  where
+    signatory manufacturer
+    controller customer can
+      AcceptFinalDelivery : ()
+        do return ()
+
+
+
+test : Script ()
+test = script do
+  customer <- allocateParty "customer"
+  manufacturer <- allocateParty "manufacturer"
+  supplier <- allocateParty "supplier"
+  workshop <- allocateParty "workshop"
+
+  let product1 = Product{
+      productName = "Product1";
+      quantity = 2
+      }
+
+  let product2 = Product{
+      productName = "Product2";
+      quantity = 2
+      }
+
+  let product3 = Product{
+      productName = "Product3";
+      quantity = 1
+      }
+
+  let product4 = Product{
+      productName = "Product4";
+      quantity = 2
+      }
+
+  customer_order_request <- submit customer  do
+    createCmd CustomerManufacturerOrderRequest with
+      customer
+      manufacturer
+      products = [product1, product2]
+
+  customer_order_request_accepted <- submit manufacturer do
+    exerciseCmd customer_order_request CustomerManufacturerOrderRequest_Accpet with
+      workflowId = "123"
+
+  supplier_order_request <- submit manufacturer do
+    exerciseCmd customer_order_request_accepted CustomerManufacturerOrderRequestAccepted_SendToSupplier with
+      supplier = supplier
+      products = [product3, product4]
+
+  customer_order_request_accepted <- submit supplier do
+    exerciseCmd supplier_order_request ManufacturerSupplierOrderRequest_Accpet with
+      workflowId = "456"
+
+
+  supplier_deliver_manufacturer <- submit supplier do
+    exerciseCmd customer_order_request_accepted FinishProcessAndDeliver with
+      deliveryNote = "FromSupplier"
+
+  submit manufacturer do
+    exerciseCmd supplier_deliver_manufacturer AcceptProudct
+
+-- send to workshop
+
+  manufacturer_order_request_workshop <- submit manufacturer  do
+    createCmd ManufacturerSendRequestToWorkshop with
+      workshop
+      manufacturer
+      products = [product1, product2]
+
+
+  workshop_done_send_to_manufacturer <- submit workshop do
+    exerciseCmd manufacturer_order_request_workshop WorkshopFinish with
+      workshopNote = "workshop_delivery"
+
+  submit manufacturer do
+    exerciseCmd workshop_done_send_to_manufacturer AcceptWorkshopProudct
+
+-- manufacturer send to customer
+  manufacturer_deliver_to_customer <- submit manufacturer  do
+    createCmd ManufacturerCustomerDelivery with
+      customer
+      manufacturer
+      deliveryNote = "manufacturer_delivery"
+
+  submit customer do
+    exerciseCmd manufacturer_deliver_to_customer AcceptFinalDelivery
+
+
+  return ()
+
+
+
+
+
+
+
